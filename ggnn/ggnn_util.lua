@@ -48,14 +48,14 @@ function ggnn.construct_propagation_net(state_dim, hid_sizes, module_dict, input
     input = input or nn.Identity()()
     prefix = prefix or PROP_NET_PREFIX
     edge_type = edge_type or 1
-    local x = input
+    local x = input -- (None, state_dim)
     local n_input = state_dim
     for i=1,#hid_sizes do
         x = nn.Tanh()(ggnn.create_or_share('Linear', prefix .. '-' .. edge_type .. '-' .. i, module_dict, {n_input, hid_sizes[i]})(x))
         n_input = hid_sizes[i]
     end
     -- local output = nn.Tanh()(ggnn.create_or_share('Linear', prefix .. '-' .. edge_type .. '-' .. (#hid_sizes+1), module_dict, {n_input, state_dim})(x))
-    local output = ggnn.create_or_share('Linear', prefix .. '-' .. edge_type .. '-' .. (#hid_sizes+1), module_dict, {n_input, state_dim})(x)
+    local output = ggnn.create_or_share('Linear', prefix .. '-' .. edge_type .. '-' .. (#hid_sizes+1), module_dict, {n_input, state_dim})(x) -- (None, state_dim)
 
     return input, output
 end
@@ -68,8 +68,8 @@ function ggnn.create_adjacency_matrix_cat(edges, n_nodes, n_edge_types)
     local a = torch.Tensor(n_nodes, n_nodes*n_edge_types*2):zero()
     for _, e in ipairs(edges) do
         local src_idx, e_type, tgt_idx = unpack(e)
-        a[tgt_idx][(e_type-1)*n_nodes+src_idx] = a[tgt_idx][(e_type-1)*n_nodes+src_idx] + 1
-        a[src_idx][(e_type-1+n_edge_types)*n_nodes+tgt_idx] = a[src_idx][(e_type-1+n_edge_types)*n_nodes+tgt_idx] + 1
+        a[tgt_idx][(e_type-1)*n_nodes+src_idx] = a[tgt_idx][(e_type-1)*n_nodes+src_idx] + 1 -- forward connection
+        a[src_idx][(e_type-1+n_edge_types)*n_nodes+tgt_idx] = a[src_idx][(e_type-1+n_edge_types)*n_nodes+tgt_idx] + 1 -- reverse connection
     end
     return a
 end

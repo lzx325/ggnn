@@ -87,6 +87,7 @@ end
 -- networks need to be dynamically created for each graph as different graphs
 -- have different sizes.
 function GraphLevelOutputNet:create_aggregation_net(n_nodes_list)
+    -- same as GraphLevelGGNN:create_aggregation_net in GraphLevelGGNN.lua
     local input = nn.Identity()()
 
     local act = ggnn.create_or_share('Linear', ggnn.AGGREGATION_NET_PREFIX .. '-input', self.module_dict, {self.state_dim+self.annotation_dim, 2*self.class_net_in_dim})(input)

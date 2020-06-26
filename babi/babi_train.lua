@@ -88,7 +88,34 @@ math.randomseed(opt.seed)
 torch.manualSeed(opt.seed)
 
 all_data = babi_data.load_graphs_from_file(opt.datafile)
-
+--[[ lizx: An example of data_list[i]
+    {
+        1 : This stores graph data
+          {
+            1 : first edge
+              {
+                1 : 1 parent
+                2 : 2 edge type
+                3 : 2 child
+              }
+            2 : second edge
+              {
+                1 : 3
+                2 : 2
+                3 : 1
+              }
+          }
+        2 : question
+          {
+            1 :
+              {
+                1 : 4 question_type
+                2 : 1 source
+                3 : 2 target
+              }
+          }
+    }
+--]]
 n_edge_types = babi_data.find_max_edge_id(all_data)
 n_tasks = babi_data.find_max_task_id(all_data)
 if opt.nval > 0 then
@@ -101,7 +128,7 @@ end
 if opt.mode == 'seqclass' or opt.mode == 'shareprop_seqclass' then
     all_task_train_data = babi_data.data_list_to_standard_data_seq(all_task_train_data, opt.annotationdim)
     all_task_val_data = babi_data.data_list_to_standard_data_seq(all_task_val_data, opt.annotationdim)
-else
+else -- selectnode, classifygraph
     all_task_train_data = babi_data.data_list_to_standard_data(all_task_train_data, opt.annotationdim)
     all_task_val_data = babi_data.data_list_to_standard_data(all_task_val_data, opt.annotationdim)
 end
@@ -125,6 +152,8 @@ print('')
 print('=========================== Task ' .. task_id .. ' =================================')
 print('')
 
+-- each task is trained seperately
+
 train_data = all_task_train_data[task_id]
 val_data = all_task_val_data[task_id]
 
@@ -138,6 +167,47 @@ os.execute('mkdir -p ' .. task_output_dir)
 
 train_data_loader = babi_data.DataLoader(train_data, true)
 val_data_loader = babi_data.DataLoader(val_data, false)
+
+--[[
+val_data[1]
+{
+  1 : edges
+    {
+      1 :
+        {
+          1 : 1
+          2 : 1
+          3 : 2
+        }
+      2 :
+        {
+          1 : 2
+          2 : 1
+          3 : 3
+        }
+    }
+  2 : one-hot encoding of annotations (max_node_id,annotation_dim)
+    {
+      1 :
+        {
+          1 : 0
+        }
+      2 :
+        {
+          1 : 1
+        }
+      3 :
+        {
+          1 : 0
+        }
+      4 :
+        {
+          1 : 0
+        }
+    }
+  3 : 1 -- prediction target
+}
+--]]
 
 ------------------------ set up network and training --------------------------
 
@@ -154,7 +224,7 @@ elseif opt.mode == 'seqclass' then
     anet = ggnn.PerNodeGGNN(state_dim, annotation_dim, prop_net_h_sizes, output_net_h_sizes, n_edge_types)
     model = ggnn.GraphLevelSequenceGGNN(glnet, anet)
 elseif opt.mode == 'shareprop_seqclass' then
-    n_classes = babi_data.find_max_target(train_data)
+    n_classes = babi_data.find_max_target(train_data) -- NOTE: there is room for <EOS> symbol
     output_net_sizes = {state_dim, state_dim, n_classes}
     pnet = ggnn.BaseGGNN(state_dim, annotation_dim, prop_net_h_sizes, n_edge_types)
     glnet = ggnn.GraphLevelOutputNet(state_dim, annotation_dim, output_net_sizes)
@@ -185,7 +255,7 @@ function feval(x)
     if x ~= params then
         params:copy(x)
     end
-    grad_params:zero()
+    grad_params:zero() -- zero out gradient buffer
 
     local loss = 0
 
@@ -203,15 +273,25 @@ function feval(x)
     -- this assumes all the targets are of the same size
     local targets = torch.Tensor(target_list)
 
+    --[[ 
+        #edges_list[i]: (n_edges,3)
+        #targets: (minibatch_size,) for selectnode mode, (minibatch_size,n_pred_steps) for seqclass mode
+        #annotations_list[i]: (n_nodes,annotation_dim)
+    --]]
     -- forward pass
     if opt.mode == 'seqclass' or opt.mode == 'shareprop_seqclass' then
         output = model:forward(edges_list, targets:size(2), n_steps, annotations_list)
-    else
+        -- For seqclass mode, output size: (minibatch_size, n_classes * n_pred_steps)
+    else -- For selectnode and classify graph
         output = model:forward(edges_list, n_steps, annotations_list)
+        -- For selectnode mode, output size: (n_total_nodes,1)
+        -- For classifygraph mode, output size: (minibatch_size,n_classes)
+
     end
     
     local loss
     local output_grad
+
     if opt.mode == 'selectnode' then
         loss, output_grad = ggnn.compute_node_selection_loss_and_grad(criterion, output, targets, model.n_nodes_list, true)
     elseif opt.mode == 'classifygraph' then
@@ -222,12 +302,12 @@ function feval(x)
     end
     
     -- backward pass
-    model:backward(output_grad)
-
+    model:backward(output_grad) -- will change grad_params inplace
     if opt.mode == 'selectnode' then
         loss = loss / minibatch_size
         grad_params:div(minibatch_size)
     end
+
     grad_params:clamp(-max_grad_scale, max_grad_scale)
 
     return loss, grad_params

@@ -1,0 +1,7 @@
+**/__pycache__/
+babi/data/bAbI-tasks/
+babi/data/extra_seq_tasks/
+babi/data/processed_*/
+babi/exp_*/
+**/*.swp
+babi/test/

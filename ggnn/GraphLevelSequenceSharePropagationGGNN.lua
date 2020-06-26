@@ -51,17 +51,17 @@ function GraphLevelSequenceSharePropagationGGNN:forward(edges_list, n_pred_steps
 
     local annotations_list_input = annotations_list
     for t=1,n_pred_steps do
-        local nodereps = self.slices[t].pnet:forward(edges_list, n_prop_steps, annotations_list_input)  -- node representations
-        local nodeanno = self.slices[t].pnet._annotations   -- node annotation matrix
-        local n_nodes_list = self.slices[t].pnet.n_nodes_list
+        local nodereps = self.slices[t].pnet:forward(edges_list, n_prop_steps, annotations_list_input)  -- node representations:  (n_total_nodes,state_dim)
+        local nodeanno = self.slices[t].pnet._annotations   -- node annotation matrix: (n_total_nodes,annotation_dim)
+        local n_nodes_list = self.slices[t].pnet.n_nodes_list 
 
-        local gl_out = self.slices[t].glnet:forward(nodereps, nodeanno, n_nodes_list)
+        local gl_out = self.slices[t].glnet:forward(nodereps, nodeanno, n_nodes_list) -- aggregated output for current time step: (minibatch_size,n_classes)
 
         if t < n_pred_steps then
-            local a_out = self.slices[t].anet:forward(nodereps, nodeanno, n_nodes_list)
+            local a_out = self.slices[t].anet:forward(nodereps, nodeanno, n_nodes_list) -- annotation for next time step: (n_total_nodes,annotation_dim)
+            -- anet is the node annotation output model
             annotations_list_input = a_out
         end
-
         if t == 1 then
             edges_list = self.slices[t].pnet.a_list    -- get the adjacency matrices to save time
             self.n_graphs = self.slices[t].pnet.n_graphs

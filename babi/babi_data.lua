@@ -12,17 +12,21 @@ function babi_data.load_graphs_from_file(filename)
     local edge_list = {}
     local target_list = {}
     for line in io.lines(filename) do
+        -- lizx: new block
         if string.len(line) == 0 then
+            -- lizx: edge_list stores graph, target_list stores question
             table.insert(data_list, {edge_list, target_list})
             edge_list = {}
             target_list = {}
         else
             local digits = {}
+            -- lizx: stores question
             if line:sub(1,1) == '?' then
                 for d in line:gmatch('%d+') do
                     table.insert(digits, tonumber(d))
                 end
                 table.insert(target_list, digits)
+            -- lizx: stores graph
             else
                 for d in line:gmatch('%d+') do
                     table.insert(digits, tonumber(d))
@@ -32,6 +36,34 @@ function babi_data.load_graphs_from_file(filename)
         end
     end
     return data_list
+--[[ lizx: An example of data_list[i]
+    {
+        1 : This stores graph data
+          {
+            1 : first edge
+              {
+                1 : 1 parent
+                2 : 2 edge type
+                3 : 2 child
+              }
+            2 : second edge
+              {
+                1 : 3
+                2 : 2
+                3 : 1
+              }
+          }
+        2 : question
+          {
+            1 :
+              {
+                1 : 4 question_type
+                2 : 1 source
+                3 : 2 target
+              }
+          }
+    }
+--]]
 end
 
 function babi_data.find_max_edge_id(data_list)
@@ -113,6 +145,8 @@ end
 -- Return standard data, lists of {edges, annotations, target}, one list per 
 -- task.
 function babi_data.data_list_to_standard_data(data_list, n_annotation_dim)
+    -- n_annotation_dim is the number of elements between question_type and label
+    -- for selectnode tasks, n_annotation_dim=1; for classifygraph tasks, n_annotation_dim=2
     local n_nodes = babi_data.find_max_node_id(data_list)
     local n_tasks = babi_data.find_max_task_id(data_list)
 
@@ -126,21 +160,68 @@ function babi_data.data_list_to_standard_data(data_list, n_annotation_dim)
         local target_list = v[2]
         for _, target in pairs(target_list) do
             local task_type = target[1]
-            local task_output = target[#target]
-            local annotation = torch.zeros(n_nodes, n_annotation_dim)
+            local task_output = target[#target] -- in selectnode and classifygraph tasks, only the last is used as label
+            local annotation = torch.zeros(n_nodes, n_annotation_dim) -- the columns of annotation matrix are one-hot annotation for each node
             for i=2,#target-1 do
                 annotation[target[i]][i-1] = 1
             end
-            table.insert(task_data_list[task_type], {edge_list, annotation:totable(), task_output})
+            table.insert(task_data_list[task_type], {edge_list, annotation:totable(), task_output}) -- totable() is np.array.tolist()
         end
     end
+
+    --[[
+    An example for task_data_list[1][i]
+    1 1 3
+    3 1 2
+    ? 1 3 1
+    The question type is 1, therefore in task_data_list[1]
+
+    {
+        1 :
+          {
+            1 :
+              {
+                1 : 1
+                2 : 1
+                3 : 3
+              }
+            2 :
+              {
+                1 : 3
+                2 : 1
+                3 : 2
+              }
+          }
+        2 : # one-hot label for all nodes
+          {
+            1 :
+              {
+                1 : 0
+              }
+            2 :
+              {
+                1 : 0
+              }
+            3 :
+              {
+                1 : 1
+              }
+            4 :
+              {
+                1 : 0
+              }
+          }
+        3 : 1
+    }
+    --]]
+    
     return task_data_list
 end
 
 -- data_list is a list of {edges, targets} tuples.
---
 -- Return standard data, lists of {edges, annotations, targets}, one list per
 -- task.  targets is a sequence of targets.
+
 function babi_data.data_list_to_standard_data_seq(data_list, n_annotation_dim)
     local n_nodes = babi_data.find_max_node_id(data_list)
     local n_tasks = babi_data.find_max_task_id(data_list)
@@ -175,7 +256,6 @@ function babi_data.data_list_to_standard_data_seq(data_list, n_annotation_dim)
 end
 
 -- Load and prepare data in standard GNN data format from file.
---
 -- n_train when provided and nonzero will be used to split the set of examples
 -- into training part and validation part.
 function babi_data.prepare_standard_data(filename, n_annotation_dim, n_train)

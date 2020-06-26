@@ -26,7 +26,7 @@ end
 
 -- Creates a copy of this network sharing the same module_dict - i.e. using 
 -- exactly the same set of parameters.
-function BaseGGNN:create_share_param_copy()
+function BaseGGNN:create_share_param_copy() 
     return ggnn.BaseGGNN(self.state_dim, self.annotation_dim, self.prop_net_h_sizes, self.n_edge_types, self.module_dict)
 end
 
@@ -86,25 +86,33 @@ function BaseGGNN:create_one_node_update_net(n_nodes_list)
     local n_graphs = #n_nodes_list
     local n_edge_types = self.n_edge_types
     local input = {}
-    -- input for each type of edge (2*n_edge_types) + input for self prop net (1) + n_graphs adjacency matrices
+    -- #input: n_edge_types*2+1+n_graphs
+    -- self.n_edge_types*2 contains (n_total_nodes,state_dim) tensors
+    -- 1 contains one (n_total_nodes,state_dim) tensor, which is the previous state
+    -- self.n_graphs contains (n_nodes,2*self.n_edge_types*n_nodes) tensors
+
+    -- #output: (n_total_nodes,state_dim)
     for i=1,n_edge_types*2+1+n_graphs do
         input[i] = nn.Identity()()
     end
-
     local output = {}
     local idx_offset = 0
-    for i=1,n_graphs do
+    for i=1,n_graphs do -- loop over samples in minibatch
+        -- forward connections
         local temp_input = {}
         for j=1,n_edge_types do
-            temp_input[j] = nn.Narrow(1,idx_offset+1,n_nodes_list[i])(input[j])
+            temp_input[j] = nn.Narrow(1,idx_offset+1,n_nodes_list[i])(input[j]) -- (n_nodes,state_dim)
         end
         if n_edge_types > 1 then
-            temp_input = nn.JoinTable(1,2)(temp_input)
+            temp_input = nn.JoinTable(1,2)(temp_input) -- (n_edge_types*n_nodes,state_dim)
         else
-            temp_input = temp_input[1]
+            temp_input = temp_input[1] -- if only one sample, unbox
         end
+        -- Aggregate forward messages by matrix multiplication
         local forward_input = nn.MM()({nn.Narrow(2,1,n_nodes_list[i]*n_edge_types)(input[self.n_edge_types*2+1+i]), temp_input})
+         -- (n_nodes,n_edge_types*n_nodes) * (n_edge_types*n_nodes,state_dim) -> (n_nodes,state_dim)
 
+        -- backward connections
         temp_input = {}
         for j=1,n_edge_types do
             temp_input[j] = nn.Narrow(1,idx_offset+1,n_nodes_list[i])(input[n_edge_types+j])
@@ -114,19 +122,33 @@ function BaseGGNN:create_one_node_update_net(n_nodes_list)
         else
             temp_input = temp_input[1]
         end
+
+        -- Aggregate backward messages by matrix multiplication
         local reverse_input = nn.MM()({nn.Narrow(2,n_nodes_list[i]*n_edge_types+1,n_nodes_list[i]*n_edge_types)(input[n_edge_types*2+1+i]), temp_input})
-        local current_state = nn.Narrow(1, idx_offset+1, n_nodes_list[i])(input[2*n_edge_types+1])
+         -- (n_nodes,n_edge_types*n_nodes) * (n_edge_types*n_nodes,state_dim) -> (n_nodes,state_dim)
 
-        local joined_input = nn.JoinTable(2,2)({forward_input, reverse_input, current_state})
-        local gates = nn.Sigmoid()(ggnn.create_or_share('Linear', ggnn.NODE_UPDATE_NET_PREFIX .. '-gate', self.module_dict, {self.state_dim * 3, self.state_dim * 2})(joined_input))
+        local current_state = nn.Narrow(1, idx_offset+1, n_nodes_list[i])(input[2*n_edge_types+1]) -- (n_nodes,state_dim)
 
-        local update_gate = nn.Narrow(2, 1, self.state_dim)(gates)
-        local reset_gate = nn.Narrow(2, self.state_dim+1, self.state_dim)(gates)
+        local joined_input = nn.JoinTable(2,2)({forward_input, reverse_input, current_state}) -- (n_nodes,3*state_dim)
+        local gates = nn.Sigmoid()(ggnn.create_or_share('Linear', ggnn.NODE_UPDATE_NET_PREFIX .. '-gate', self.module_dict, {self.state_dim * 3, self.state_dim * 2})(joined_input)) -- (state_dim,2*state_dim)
+
+        local update_gate = nn.Narrow(2, 1, self.state_dim)(gates) -- (n_nodes,state_dim)
+        local reset_gate = nn.Narrow(2, self.state_dim+1, self.state_dim)(gates) -- (n_nodes,state_dim)
         
-        joined_input = nn.JoinTable(2,2)({forward_input, reverse_input, nn.CMulTable()({reset_gate, current_state})})
+        joined_input = nn.JoinTable(2,2)({forward_input, reverse_input, nn.CMulTable()({reset_gate, current_state})}) -- (n_nodes,3*state_dim)
         local transformed_output = nn.Tanh()(ggnn.create_or_share('Linear', ggnn.NODE_UPDATE_NET_PREFIX .. '-transform', self.module_dict, {self.state_dim * 3, self.state_dim})(joined_input))
 
-        output[i] = nn.CAddTable()({current_state, nn.CMulTable()({update_gate, nn.CSubTable()({transformed_output, current_state})})})
+        output[i] = nn.CAddTable()(
+            {
+                current_state, 
+                nn.CMulTable()(
+                    {
+                        update_gate, 
+                        nn.CSubTable()({transformed_output, current_state})
+                    }
+                )
+            }
+        ) -- (n_nodes,state_dim) A rewrite of Eq. (6)
 
         idx_offset = idx_offset + n_nodes_list[i]
     end
@@ -165,20 +187,23 @@ function BaseGGNN:construct_network_for_graphs(n_steps, n_nodes_list)
             if not self.prop_net[i_step] then
                 self.prop_net[i_step] = {}
                 for e_type=1,self.n_edge_types do
+                    -- for forward edges
                     input, output = ggnn.construct_propagation_net(self.state_dim, self.prop_net_h_sizes, self.module_dict, nil, ggnn.PROP_NET_PREFIX, e_type)
+                    -- input and output are of type nngraph.Node
                     self.prop_net[i_step][e_type] = nn.gModule({input}, {output})
-
+                    -- for backward edges
                     input, output = ggnn.construct_propagation_net(self.state_dim, self.prop_net_h_sizes, self.module_dict, nil, ggnn.REVERSE_PROP_NET_PREFIX, e_type)
                     self.prop_net[i_step][e_type+self.n_edge_types] = nn.gModule({input}, {output})
                 end
             end
         end
     end
-
+    -- #self.prop_net: (n_steps,self.n_edge_types)
     self.add_net = {}
     for i_step=1,n_steps do 
         self.add_net[i_step] = self:create_one_node_update_net(n_nodes_list)
     end
+    -- #self.add_net: (n_steps,)
 end
 
 -- Return a list of parameters and a list of parameter gradients. This function
@@ -226,6 +251,9 @@ end
 -- annotations is a concatenated annotation matrix, with the annotations for 
 -- first graph taking the top rows, second graph after that and so on.
 function BaseGGNN:forward_with_adjacency_matrices_and_concatenated_annotation_matrix(adjacency_list, n_steps, annotations)
+    -- #adjacency_list: minibatch_size
+    -- #adjacency_list[i]: (n_nodes,2*n_edge_types*n_nodes)
+    -- #annotations: (n_total_nodes,annotation_dim)
     local n_nodes_list = {}
     local n_total_nodes = 0
     for i, adj in ipairs(adjacency_list) do
@@ -233,10 +261,10 @@ function BaseGGNN:forward_with_adjacency_matrices_and_concatenated_annotation_ma
         n_total_nodes = n_total_nodes + adj:size(1)
     end
 
-    self.n_nodes_list = n_nodes_list
+    self.n_nodes_list = n_nodes_list -- number of nodes in each graph in the minibatch
     self.n_steps = n_steps
 
-    self:construct_network_for_graphs(n_steps, n_nodes_list)
+    self:construct_network_for_graphs(n_steps, n_nodes_list) -- the network is constructed on each forward pass, but the weights are shared
 
     self.a_list = adjacency_list
 
@@ -245,24 +273,44 @@ function BaseGGNN:forward_with_adjacency_matrices_and_concatenated_annotation_ma
 
     assert(annotations:size(1) == n_total_nodes)
 
-    local input = torch.zeros(n_total_nodes, self.state_dim)
-    input:narrow(2,1,self.annotation_dim):copy(annotations)
+    local input = torch.zeros(n_total_nodes, self.state_dim) -- initialize all node states in current minibatch
+    input:narrow(2,1,self.annotation_dim):copy(annotations)  -- initialize initial dimensions with annotations
+    -- input:narrow(2,1,self.annotation_dim) is input[:,1:(1+self.annotation_dim)]
+    -- Corresponding to Eq.(1) in paper
 
     self._annotations = annotations -- keep this for use in the future
+
+    -- #self.prop_net: (n_steps,2*self.n_edge_types) 2 for both forward and backward
+    -- #self.prop_inputs: n_steps+1
+    -- #self.prop_inputs[i_step]: (n_total_nodes,state_dim)
+    -- #self.prop_outputs: n_steps
+    -- #self.prop_outputs[i_step]: n_edge_types*2+1+n_graphs
+    -- self.n_edge_types*2 contains (n_total_nodes,state_dim) tensors
+    -- 1 contains one (n_total_nodes,state_din_nodes) tensor, which is the previous state
+    -- self.n_graphs contains (n_nodes,2*self.n_edge_types*n_nodes) tensors
 
     self.prop_inputs[1] = input
     for i_step=1,n_steps do
         self.prop_outputs[i_step] = {}
         for i=1,self.n_edge_types*2 do
-            self.prop_outputs[i_step][i] = self.prop_net[i_step][i]:forward(self.prop_inputs[i_step])
+            self.prop_outputs[i_step][i] = self.prop_net[i_step][i]:forward(self.prop_inputs[i_step]) 
+            -- Compute messages generated by each node. Each node is generating a different message for each type and direction of edges.
         end
         self.prop_outputs[i_step][self.n_edge_types*2+1] = self.prop_inputs[i_step]
         for i=1,self.n_graphs do
             table.insert(self.prop_outputs[i_step], self.a_list[i])
         end
-        self.prop_inputs[i_step+1] = self.add_net[i_step]:forward(self.prop_outputs[i_step])
+        self.prop_inputs[i_step+1] = self.add_net[i_step]:forward(self.prop_outputs[i_step]) -- input for next step
     end
-
+    --[[
+    print(#self.prop_net,#self.prop_net[1])
+    print(#self.prop_inputs,#self.prop_inputs[1])
+    print(#self.prop_outputs,#self.prop_outputs[1])
+    for i=1,#self.prop_outputs[1] do
+        print(#self.prop_outputs[1][i])
+    end
+    os.exit(0)
+    --]]
     self.n_total_nodes = n_total_nodes
 
     return self.prop_inputs[n_steps+1]
@@ -277,6 +325,12 @@ function BaseGGNN:forward_with_adjacency_and_annotation_matrices(adjacency_list,
     end
 
     local annotations = self._cat_annotations_net:forward(annotations_list)
+    -- #adjacency_list: minibatch_size
+    -- #adjacency_list[i]: (n_nodes,2*n_edge_types*n_nodes)
+    -- #annotations_list: minibatch_size, stores graph structure like in Figure 1(c)
+    -- #annotations_list[i]: (n_nodes,annotation_dim)
+    -- #annotations: (n_total_nodes,annotation_dim)
+    -- #return : (n_total_nodes, state_dim)
     return self:forward_with_adjacency_matrices_and_concatenated_annotation_matrix(adjacency_list, n_steps, annotations)
     --]]
 end
@@ -292,6 +346,8 @@ end
 -- also just be a single tensor, which is the concatenated annotations for all
 -- graphs.
 function BaseGGNN:forward(edges_list, n_steps, annotations_list)
+    -- #edges_list[i]:(n_edges,3)
+    -- #annotations_list[i]:(n_nodes,annotation_dim)
     if type(annotations_list) == 'userdata' then   -- single tensor case
         assert(type(edges_list[1]) == 'userdata')  -- edges_list must be a list of adjacency matrices
         return self:forward_with_adjacency_matrices_and_concatenated_annotation_matrix(edges_list, n_steps, annotations_list)
@@ -308,12 +364,16 @@ function BaseGGNN:forward(edges_list, n_steps, annotations_list)
         else
             annotations_tensor_list[i] = annotations
         end
+        
 
         if type(edges_list[i]) == 'table' then
             adjacency_matrix_list[i] = ggnn.create_adjacency_matrix_cat(edges_list[i], annotations_tensor_list[i]:size(1), self.n_edge_types)
         else
             adjacency_matrix_list[i] = edges_list[i]
         end
+        -- #annotations_tensor_list[i]: (n_nodes,annotation_dim)
+        -- #adjacency_matrix_list[i]: (n_nodes,2*n_edge_types*n_nodes). See Figure 1(c) in the paper.
+        -- 2 for forward and backward
     end
 
     return self:forward_with_adjacency_and_annotation_matrices(adjacency_matrix_list, n_steps, annotations_tensor_list)

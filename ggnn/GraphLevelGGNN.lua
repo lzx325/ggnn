@@ -108,6 +108,7 @@ function GraphLevelGGNN:create_aggregation_net(n_nodes_list)
 
     local summed_act = {}
     local idx_offset = 0
+
     for i, n_nodes in ipairs(n_nodes_list) do
         table.insert(summed_act, nn.Reshape(1,self.class_net_in_dim, false)(nn.Sum(1)(nn.Narrow(1, idx_offset+1, n_nodes)(gated_h))))
         idx_offset = idx_offset + n_nodes
@@ -135,7 +136,9 @@ function GraphLevelGGNN:forward(edges_list, n_steps, annotations_list)
     self.aggregation_net_input:narrow(2,self.state_dim+1,self.annotation_dim):copy(self.prop_inputs[1]:narrow(2,1,self.annotation_dim))
 
     self.c_input = self.aggregation_net:forward(self.aggregation_net_input)
+    -- #self.aggregation_net_input: (n_total_nodes, self.state_dim + self.annotation_dim) -> #self.c_input: (minibatch_size,state_dim)
     return self.output_net:forward(self.c_input)
+    -- #self.output_net:forward(self.c_input): (minibatch_size,n_classes)
 end
 
 -- A convinience function for making predictions.

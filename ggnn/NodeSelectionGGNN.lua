@@ -70,14 +70,19 @@ end
 -- take annotation_list to build inputs and push the inputs through the network
 -- to get selected node.
 function NodeSelectionGGNN:forward(edges_list, n_steps, annotations_list)
+
+    
     BaseGGNN.forward(self, edges_list, n_steps, annotations_list)
 
     self.output_net_input = torch.Tensor(self.n_total_nodes, self.state_dim + self.annotation_dim)
+    
     self.output_net_input:narrow(2,1,self.state_dim):copy(self.prop_inputs[n_steps+1])
+    -- #self.prop_inputs[n_steps+1]=(self.n_total_nodes,self.state_dim)
+    -- the propagation states of all nodes in the current minibatch are gathered in self.prop_inputs
     self.output_net_input:narrow(2,self.state_dim+1,self.annotation_dim):copy(self.prop_inputs[1]:narrow(2,1,self.annotation_dim))
-
+    -- #self.prop_inputs[1]=(self.n_total_nodes,self.state_dim)
     self.output_scores = self.output_net:forward(self.output_net_input)
-
+    -- #self.output_scores=(self.n_total_nodes,1)
     return self.output_scores
 end
 

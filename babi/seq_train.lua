@@ -105,7 +105,7 @@ else
     error('Unknown mode ' .. opt.mode)
 end
 
-seq_data.add_end_node(all_task_train_data, false)
+seq_data.add_end_node(all_task_train_data, false) -- add end note annotation
 seq_data.add_end_node(all_task_val_data, false)
 
 print(tostring(n_tasks) .. ' tasks in total')
@@ -202,7 +202,6 @@ function feval(x)
 
         -- forward pass
         local output = model:forward(edges_list, targets:size(2), n_steps, annotations_list)
-        
         local output_grad
         loss, output_grad = ggnn.compute_node_selection_seq_ggnn_loss_and_grad(criterion, output, targets, model.n_nodes_list, true)
         
@@ -217,7 +216,8 @@ function feval(x)
             targets = torch.Tensor(targets)
             targets:resize(1,targets:nElement())
 
-            local output = model:forward({edges}, targets:size(2), n_steps, {annotation})
+            local output = model:forward({edges}, targets:size(2), n_steps, {annotation}) -- #output: n_pred_steps, #output[1]: (n_total_nodes,1)
+
             local i_loss, output_grad = ggnn.compute_node_selection_seq_ggnn_loss_and_grad(criterion, output, targets, model.n_nodes_list, true)
 
             loss = loss + i_loss
